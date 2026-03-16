@@ -1,8 +1,15 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useAuth } from "../contexts/AuthContext.tsx";
 import { useFridge, useUpdateFridge } from "../hooks/useServerState";
 import type { StockItem } from "../types";
 import { ReceiptScanner } from "./ReceiptScanner";
+import { FridgeItemModal } from "./FridgeItemModal";
+import type { FridgeItemValues } from "./FridgeItemModal";
+
+/** StockItem extended with a stable identity for edit-safe rendering. */
+interface EditableStockItem extends StockItem {
+  _editId: number;
+}
 
 interface GroupedItem {
   key: string;
@@ -38,24 +45,29 @@ export function Fridge() {
   const { data: serverFridge, isLoading, error: fetchError } = useFridge(userId);
   const updateFridgeMutation = useUpdateFridge();
 
-  const [fridge, setFridge] = useState<StockItem[]>([]);
-  const [notice, setNotice] = useState<string>("");
+  const nextEditId = useRef(0);
+  const assignId = (): number => nextEditId.current++;
+  const [fridge, setFridge] = useState<EditableStockItem[]>([]);
+  const [notice, setNotice] = useState("");
   const [expanded, setExpanded] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   // Stable group order — only changes on load, save, add, remove, and sort toggle
   const [groupOrder, setGroupOrder] = useState<string[]>([]);
+  const [modalState, setModalState] = useState<{ mode: "add" | "edit"; editIndex: number | null } | null>(null);
 
   /** Build grouped items from the flat fridge array. */
-  const buildGroups = useCallback((items: StockItem[]): GroupedItem[] => {
+  const buildGroups = useCallback((items: EditableStockItem[]): GroupedItem[] => {
     const groups = new Map<string, GroupedItem>();
 
     items.forEach((item, index) => {
       const trimmed = item.name.trim().toLowerCase();
       if (!trimmed) {
-        groups.set(`__blank_${index}`, {
-          key: `__blank_${index}`,
+        // Blank items get a stable key from their _editId
+        const stableKey = `__blank_${item._editId}`;
+        groups.set(stableKey, {
+          key: stableKey,
           displayName: "",
           totalQuantity: item.quantity_grams,
           earliestExpiration: item.expiration_date ?? null,
@@ -68,6 +80,10 @@ export function Fridge() {
 
       const existing = groups.get(trimmed);
       if (existing) {
+        // Merging into a multi-batch group: switch GroupedItem.key to name-based
+        if (existing.batchCount === 1 && existing.key !== trimmed) {
+          existing.key = trimmed;
+        }
         existing.totalQuantity += item.quantity_grams;
         existing.flatIndices.push(index);
         existing.batchCount++;
@@ -81,8 +97,10 @@ export function Fridge() {
           existing.needToUse = true;
         }
       } else {
+        // Single item: use stable _editId key so edits don't change position
+        const stableKey = `__item_${item._editId}`;
         groups.set(trimmed, {
-          key: trimmed,
+          key: stableKey,
           displayName: item.name,
           totalQuantity: item.quantity_grams,
           earliestExpiration: item.expiration_date ?? null,
@@ -119,14 +137,17 @@ export function Fridge() {
   }, []);
 
   /** Recompute and freeze group order from the current fridge state. */
-  const refreshGroupOrder = useCallback((items: StockItem[], key: SortKey, dir: "asc" | "desc") => {
+  const refreshGroupOrder = useCallback((items: EditableStockItem[], key: SortKey, dir: "asc" | "desc") => {
     const groups = buildGroups(items);
     setGroupOrder(sortGroups(groups, key, dir));
   }, [buildGroups, sortGroups]);
 
   useEffect(() => {
     if (serverFridge) {
-      const copy: StockItem[] = JSON.parse(JSON.stringify(serverFridge));
+      const copy: EditableStockItem[] = serverFridge.map(item => ({
+        ...JSON.parse(JSON.stringify(item)),
+        _editId: assignId(),
+      }));
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setFridge(copy);
       refreshGroupOrder(copy, sortKey, sortDir);
@@ -154,13 +175,22 @@ export function Fridge() {
     return ordered;
   }, [groupedItems, groupOrder]);
 
-  const addFridgeItem = () => {
-    const updated = [
-      ...fridge,
-      { name: "", quantity_grams: 100, need_to_use: false, expiration_date: null }
-    ];
-    setFridge(updated);
-    refreshGroupOrder(updated, sortKey, sortDir);
+  /** Persist the given fridge items to the backend. */
+  const persistFridge = (items: EditableStockItem[]) => {
+    if (!userId) return;
+    const cleaned: StockItem[] = items
+      .filter((item) => item.name.trim() !== "")
+      .map(({ _editId: _, ...rest }) => rest);
+    updateFridgeMutation.mutate(
+      { userId, items: cleaned },
+      {
+        onError: (err) => {
+          const msg = err instanceof Error ? err.message : "Unknown error";
+          setNotice(`Failed to save: ${msg}`);
+          setTimeout(() => setNotice(""), 5000);
+        },
+      },
+    );
   };
 
   const removeFridgeItem = (index: number) => {
@@ -168,6 +198,7 @@ export function Fridge() {
     updated.splice(index, 1);
     setFridge(updated);
     refreshGroupOrder(updated, sortKey, sortDir);
+    persistFridge(updated);
   };
 
   const removeGroup = (indices: number[]) => {
@@ -176,23 +207,45 @@ export function Fridge() {
     for (const idx of sorted) updated.splice(idx, 1);
     setFridge(updated);
     refreshGroupOrder(updated, sortKey, sortDir);
+    persistFridge(updated);
   };
 
-  const toggleNeedToUse = (index: number) => {
-    const updated = [...fridge];
-    updated[index].need_to_use = !updated[index].need_to_use;
+  const openAddModal = () => setModalState({ mode: "add", editIndex: null });
+  const openEditModal = (flatIndex: number) => setModalState({ mode: "edit", editIndex: flatIndex });
+
+  const handleModalOk = (values: FridgeItemValues) => {
+    let updated: EditableStockItem[];
+    if (modalState?.mode === "add") {
+      updated = [
+        ...fridge,
+        {
+          name: values.name,
+          quantity_grams: values.quantity_grams,
+          need_to_use: values.need_to_use,
+          expiration_date: values.expiration_date,
+          _editId: assignId(),
+        },
+      ];
+    } else if (modalState?.mode === "edit" && modalState.editIndex !== null) {
+      updated = [...fridge];
+      updated[modalState.editIndex] = {
+        ...updated[modalState.editIndex],
+        name: values.name,
+        quantity_grams: values.quantity_grams,
+        need_to_use: values.need_to_use,
+        expiration_date: values.expiration_date,
+      };
+    } else {
+      setModalState(null);
+      return;
+    }
     setFridge(updated);
+    refreshGroupOrder(updated, sortKey, sortDir);
+    persistFridge(updated);
+    setModalState(null);
   };
 
-  const updateFridgeItem = <K extends keyof StockItem>(
-    index: number,
-    field: K,
-    value: StockItem[K]
-  ) => {
-    const updated = [...fridge];
-    updated[index] = { ...updated[index], [field]: value };
-    setFridge(updated);
-  };
+  const handleModalCancel = () => setModalState(null);
 
   const toggleSort = (key: SortKey) => {
     const newDir = sortKey === key
@@ -214,25 +267,6 @@ export function Fridge() {
     });
   };
 
-  const handleSaveFridge = async () => {
-    if (!userId) return;
-
-    const cleanedFridge = fridge.filter((item) => item.name.trim() !== "");
-
-    try {
-      await updateFridgeMutation.mutateAsync({ userId, items: cleanedFridge });
-
-      setNotice("Fridge saved successfully!");
-      setTimeout(() => setNotice(""), 3000);
-    } catch (err) {
-      if (err instanceof Error) {
-        setNotice(`Failed to save: ${err.message}`);
-      } else {
-        setNotice("Failed to save: Unknown error occurred.");
-      }
-    }
-  };
-
   if (!userId) {
     return (
       <section style={{ marginBottom: "2rem" }}>
@@ -246,39 +280,13 @@ export function Fridge() {
     const idx = group.flatIndices[0];
     const item = fridge[idx];
     return (
-      <tr key={group.key} style={{ borderBottom: "1px solid #eee" }}>
-        <td>
-          <input
-            type="text"
-            value={item.name}
-            onChange={(e) => updateFridgeItem(idx, "name", e.target.value)}
-            placeholder="e.g. Chicken breast"
-          />
-        </td>
-        <td>
-          <input
-            type="number"
-            value={item.quantity_grams}
-            onChange={(e) => updateFridgeItem(idx, "quantity_grams", parseInt(e.target.value) || 0)}
-            style={{ width: "60px" }}
-          />
-        </td>
-        <td>
-          <input
-            type="date"
-            value={item.expiration_date ?? ""}
-            onChange={(e) => updateFridgeItem(idx, "expiration_date", e.target.value || null)}
-            style={{ width: "130px" }}
-          />
-        </td>
-        <td>
-          <input
-            type="checkbox"
-            checked={item.need_to_use}
-            onChange={() => toggleNeedToUse(idx)}
-          />
-        </td>
-        <td>
+      <tr key={item._editId} style={{ borderBottom: "1px solid #eee" }}>
+        <td>{item.name}</td>
+        <td>{Math.round(item.quantity_grams)}</td>
+        <td style={{ fontSize: "0.85rem" }}>{formatDate(item.expiration_date)}</td>
+        <td>{item.need_to_use ? "Yes" : "No"}</td>
+        <td style={{ display: "flex", gap: "0.25rem" }}>
+          <button onClick={() => openEditModal(idx)}>Edit</button>
           <button onClick={() => removeFridgeItem(idx)}>Remove</button>
         </td>
       </tr>
@@ -304,20 +312,7 @@ export function Fridge() {
           <span style={{ fontSize: "0.8rem", color: "#888" }}>
             {isExpanded ? "\u25BC" : "\u25B6"}
           </span>
-          <input
-            type="text"
-            value={group.displayName}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => {
-              const newName = e.target.value;
-              const updated = [...fridge];
-              for (const idx of group.flatIndices) {
-                updated[idx] = { ...updated[idx], name: newName };
-              }
-              setFridge(updated);
-            }}
-            placeholder="e.g. Chicken breast"
-          />
+          <span>{group.displayName}</span>
           <span style={{ fontSize: "0.8rem", color: "#64748b", whiteSpace: "nowrap" }}>
             ({group.batchCount} batches)
           </span>
@@ -326,9 +321,7 @@ export function Fridge() {
         <td style={{ fontSize: "0.85rem", color: "#94a3b8" }}>
           {formatDate(group.earliestExpiration)}
         </td>
-        <td>
-          <input type="checkbox" checked={group.needToUse} disabled />
-        </td>
+        <td>{group.needToUse ? "Yes" : "No"}</td>
         <td>
           <button onClick={(e) => { e.stopPropagation(); removeGroup(group.flatIndices); }}>
             Remove all
@@ -363,30 +356,11 @@ export function Fridge() {
                 Batch {batchIdx + 1}
               </span>
             </td>
-            <td>
-              <input
-                type="number"
-                value={item.quantity_grams}
-                onChange={(e) => updateFridgeItem(flatIdx, "quantity_grams", parseInt(e.target.value) || 0)}
-                style={{ width: "60px" }}
-              />
-            </td>
-            <td>
-              <input
-                type="date"
-                value={item.expiration_date ?? ""}
-                onChange={(e) => updateFridgeItem(flatIdx, "expiration_date", e.target.value || null)}
-                style={{ width: "130px" }}
-              />
-            </td>
-            <td>
-              <input
-                type="checkbox"
-                checked={item.need_to_use}
-                onChange={() => toggleNeedToUse(flatIdx)}
-              />
-            </td>
-            <td>
+            <td>{Math.round(item.quantity_grams)}</td>
+            <td style={{ fontSize: "0.85rem" }}>{formatDate(item.expiration_date)}</td>
+            <td>{item.need_to_use ? "Yes" : "No"}</td>
+            <td style={{ display: "flex", gap: "0.25rem" }}>
+              <button onClick={() => openEditModal(flatIdx)}>Edit</button>
               <button onClick={() => removeFridgeItem(flatIdx)}>Remove</button>
             </td>
           </tr>
@@ -450,17 +424,32 @@ export function Fridge() {
           </table>
 
           <div style={{ marginTop: "0.5rem" }}>
-            <button onClick={addFridgeItem}>Add ingredient</button>{" "}
-            <button onClick={handleSaveFridge} disabled={updateFridgeMutation.isPending}>
-              {updateFridgeMutation.isPending ? "Saving..." : "Save fridge"}
-            </button>
+            <button onClick={openAddModal}>Add ingredient</button>
             {notice && (
-              <div style={{ marginTop: "0.5rem", color: updateFridgeMutation.isError ? "red" : "green" }}>
+              <div style={{ marginTop: "0.5rem", color: "red" }}>
                 {notice}
               </div>
             )}
           </div>
         </div>
+      )}
+
+      {modalState && (
+        <FridgeItemModal
+          mode={modalState.mode}
+          initialValues={
+            modalState.mode === "edit" && modalState.editIndex !== null
+              ? {
+                  name: fridge[modalState.editIndex].name,
+                  quantity_grams: fridge[modalState.editIndex].quantity_grams,
+                  expiration_date: fridge[modalState.editIndex].expiration_date ?? null,
+                  need_to_use: fridge[modalState.editIndex].need_to_use,
+                }
+              : { name: "", quantity_grams: 100, expiration_date: null, need_to_use: false }
+          }
+          onOk={handleModalOk}
+          onCancel={handleModalCancel}
+        />
       )}
     </section>
   );
