@@ -1,5 +1,7 @@
 from fastapi import Depends, HTTPException, APIRouter, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -7,6 +9,7 @@ from app.db import get_session
 from app.models.db_models import User
 from app.models.user_schemas import UserCreate, UserRead, UserUpdate, Token, MessageResponse
 from app.core.security import verify_password, get_password_hash, create_access_token
+from app.core.config import settings
 from app.api.deps import get_current_user
 from app.core.rate_limit import limiter
 
@@ -35,9 +38,21 @@ def _to_read(u: User) -> UserRead:
 @limiter.limit("5/minute")
 async def register_user(
         request: Request,
-        user: UserCreate,
         session: AsyncSession = Depends(get_session)
 ) -> MessageResponse:
+    # Guard runs before body parsing so callers get 403, not a 422 validation error
+    if not settings.registration_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is closed. This is a private alpha — contact the admin for access.",
+        )
+
+    # Parse and validate the body now that we know registration is open
+    try:
+        user = UserCreate.model_validate(await request.json())
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
     # 1. Check if a user already exists
     statement = select(User).where(User.email == user.email)
     result = await session.execute(statement)
