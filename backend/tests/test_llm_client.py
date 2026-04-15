@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 from fastapi import HTTPException
-from google.genai.errors import ClientError as GeminiClientError
+from google.genai.errors import ClientError as GeminiClientError, ServerError as GeminiServerError
 from openai import APIStatusError as OpenAIAPIStatusError, RateLimitError as OpenAIRateLimitError
 from pydantic import BaseModel
 
@@ -36,6 +36,34 @@ def _payment_required_error() -> OpenAIAPIStatusError:
     return OpenAIAPIStatusError(
         message="Insufficient balance",
         response=MagicMock(status_code=402, headers={}),
+        body=None,
+    )
+
+
+def _model_not_found_gemini() -> GeminiClientError:
+    """Create a Gemini 404 — model unavailable (e.g. preview rename)."""
+    return GeminiClientError(404, {"error": {"message": "Model not found"}})
+
+
+def _model_not_found_openai() -> OpenAIAPIStatusError:
+    """Create an OpenAI-compatible 404 Not Found error."""
+    return OpenAIAPIStatusError(
+        message="Model not found",
+        response=MagicMock(status_code=404, headers={}),
+        body=None,
+    )
+
+
+def _service_unavailable_gemini() -> GeminiServerError:
+    """Create a Gemini 503 — service unavailable / high demand (common on preview models)."""
+    return GeminiServerError(503, {"error": {"message": "The model is overloaded. Please try again later."}})
+
+
+def _service_unavailable_openai() -> OpenAIAPIStatusError:
+    """Create an OpenAI-compatible 503 Service Unavailable error."""
+    return OpenAIAPIStatusError(
+        message="Service unavailable",
+        response=MagicMock(status_code=503, headers={}),
         body=None,
     )
 
@@ -95,48 +123,85 @@ class TestMockMode:
         assert len(result.meals) == 1
 
 
-class TestIsQuotaError:
-    """Tests for _is_quota_error helper — Gemini and OpenAI."""
+class TestIsFallbackError:
+    """Tests for _is_fallback_error helper — Gemini and OpenAI, codes 402/404/429."""
 
     def test_direct_gemini_429(self) -> None:
         client = LLMClient()
-        assert client._is_quota_error(_quota_error_gemini()) is True
+        assert client._is_fallback_error(_quota_error_gemini()) is True
 
     def test_wrapped_gemini_429(self) -> None:
         """Instructor may wrap the original error as __cause__."""
         client = LLMClient()
         wrapper = Exception("Instructor retry exhausted")
         wrapper.__cause__ = _quota_error_gemini()
-        assert client._is_quota_error(wrapper) is True
+        assert client._is_fallback_error(wrapper) is True
 
-    def test_non_429_gemini_client_error(self) -> None:
+    def test_gemini_400_is_not_fallback(self) -> None:
+        """400 Bad Request means our input is wrong — no model in chain will fix it."""
         client = LLMClient()
         err = GeminiClientError(400, {"error": {"message": "Bad request"}})
-        assert client._is_quota_error(err) is False
+        assert client._is_fallback_error(err) is False
 
     def test_generic_exception(self) -> None:
         client = LLMClient()
-        assert client._is_quota_error(Exception("timeout")) is False
+        assert client._is_fallback_error(Exception("timeout")) is False
 
     def test_direct_openai_429(self) -> None:
         client = LLMClient()
-        assert client._is_quota_error(_quota_error_openai()) is True
+        assert client._is_fallback_error(_quota_error_openai()) is True
 
     def test_wrapped_openai_429(self) -> None:
         client = LLMClient()
         wrapper = Exception("Instructor retry exhausted")
         wrapper.__cause__ = _quota_error_openai()
-        assert client._is_quota_error(wrapper) is True
+        assert client._is_fallback_error(wrapper) is True
 
     def test_direct_402_payment_required(self) -> None:
         client = LLMClient()
-        assert client._is_quota_error(_payment_required_error()) is True
+        assert client._is_fallback_error(_payment_required_error()) is True
 
     def test_wrapped_402_payment_required(self) -> None:
         client = LLMClient()
         wrapper = Exception("Instructor retry exhausted")
         wrapper.__cause__ = _payment_required_error()
-        assert client._is_quota_error(wrapper) is True
+        assert client._is_fallback_error(wrapper) is True
+
+    def test_direct_gemini_404_model_not_found(self) -> None:
+        """A renamed/removed preview model should advance the chain, not abort."""
+        client = LLMClient()
+        assert client._is_fallback_error(_model_not_found_gemini()) is True
+
+    def test_wrapped_gemini_404(self) -> None:
+        client = LLMClient()
+        wrapper = Exception("Instructor retry exhausted")
+        wrapper.__cause__ = _model_not_found_gemini()
+        assert client._is_fallback_error(wrapper) is True
+
+    def test_direct_openai_404(self) -> None:
+        client = LLMClient()
+        assert client._is_fallback_error(_model_not_found_openai()) is True
+
+    def test_direct_gemini_503_service_unavailable(self) -> None:
+        """A Gemini preview returning 503 'overloaded' should advance the chain."""
+        client = LLMClient()
+        assert client._is_fallback_error(_service_unavailable_gemini()) is True
+
+    def test_wrapped_gemini_503(self) -> None:
+        client = LLMClient()
+        wrapper = Exception("Instructor retry exhausted")
+        wrapper.__cause__ = _service_unavailable_gemini()
+        assert client._is_fallback_error(wrapper) is True
+
+    def test_direct_openai_503(self) -> None:
+        client = LLMClient()
+        assert client._is_fallback_error(_service_unavailable_openai()) is True
+
+    def test_gemini_500_is_not_fallback(self) -> None:
+        """500 Internal Server Error is not a 'try another model' signal — next model likely fails too."""
+        client = LLMClient()
+        err = GeminiServerError(500, {"error": {"message": "Internal error"}})
+        assert client._is_fallback_error(err) is False
 
 
 class TestFallbackChain:
@@ -229,8 +294,8 @@ class TestFallbackChain:
         assert exc_info.value.status_code == 502
 
     @patch("app.llm.client.settings")
-    async def test_non_429_stops_immediately(self, mock_settings: MagicMock) -> None:
-        """Non-429 error on first model → 502, no fallback attempt."""
+    async def test_non_fallback_error_stops_immediately(self, mock_settings: MagicMock) -> None:
+        """400 (bad input) on first model → 502, no fallback attempt."""
         mock_settings.llm_mock = False
         mock_settings.model_chain = _chain("gemini/model-a", "gemini/model-b")
         mock_settings.gemini_api_key = "fake-key"
@@ -248,6 +313,66 @@ class TestFallbackChain:
             await client.chat_json("sys", "usr", SingleDayResponse)
         assert exc_info.value.status_code == 502
         assert mock_gemini.chat.completions.create.await_count == 1
+
+    @patch("app.llm.client.settings")
+    async def test_fallback_on_404_model_not_found(self, mock_settings: MagicMock) -> None:
+        """Primary model 404 (e.g. preview renamed) → second model succeeds.
+
+        Regression guard: originally only 429/402 fell back, so a stale preview
+        model name at the head of the chain would 502 instead of advancing.
+        """
+        mock_settings.llm_mock = False
+        mock_settings.model_chain = _chain(
+            "gemini/gemini-3.1-flash-lite-preview",
+            "gemini/gemini-2.5-flash",
+        )
+        mock_settings.gemini_api_key = "fake-key"
+        mock_settings.openai_api_key = None
+        mock_settings.deepseek_api_key = None
+
+        client = LLMClient()
+        expected = _mock_single_day()
+        mock_gemini = MagicMock()
+        mock_gemini.chat.completions.create = AsyncMock(
+            side_effect=[_model_not_found_gemini(), expected],
+        )
+        client.gemini_client = mock_gemini
+
+        result = await client.chat_json("sys", "usr", SingleDayResponse)
+        assert result == expected
+        assert mock_gemini.chat.completions.create.await_count == 2
+        second_call = mock_gemini.chat.completions.create.call_args_list[1]
+        assert second_call.kwargs["model"] == "gemini-2.5-flash"
+
+    @patch("app.llm.client.settings")
+    async def test_fallback_on_503_service_unavailable(self, mock_settings: MagicMock) -> None:
+        """Primary model 503 (overloaded preview) → second model succeeds.
+
+        Regression guard: a 'high demand' preview model at the head of the chain
+        must not take down the whole call — the chain should advance instead.
+        """
+        mock_settings.llm_mock = False
+        mock_settings.model_chain = _chain(
+            "gemini/gemini-3.1-flash-lite-preview",
+            "gemini/gemini-2.5-flash",
+        )
+        mock_settings.gemini_api_key = "fake-key"
+        mock_settings.openai_api_key = None
+        mock_settings.deepseek_api_key = None
+
+        client = LLMClient()
+        expected = _mock_single_day()
+        mock_gemini = MagicMock()
+        mock_gemini.chat.completions.create = AsyncMock(
+            side_effect=[_service_unavailable_gemini(), expected],
+        )
+        client.gemini_client = mock_gemini
+
+        result = await client.chat_json("sys", "usr", SingleDayResponse)
+        assert result == expected
+        assert mock_gemini.chat.completions.create.await_count == 2
+        second_call = mock_gemini.chat.completions.create.call_args_list[1]
+        assert second_call.kwargs["model"] == "gemini-2.5-flash"
 
     @patch("app.llm.client.settings")
     async def test_mixed_providers(self, mock_settings: MagicMock) -> None:

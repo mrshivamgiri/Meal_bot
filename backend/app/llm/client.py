@@ -6,7 +6,7 @@ import instructor
 from fastapi import HTTPException
 from google import genai
 from google.genai import types as genai_types
-from google.genai.errors import ClientError as GeminiClientError
+from google.genai.errors import APIError as GeminiAPIError
 from google.genai.types import HttpOptionsDict
 from openai import AsyncOpenAI, RateLimitError as OpenAIRateLimitError, APIStatusError as OpenAIAPIStatusError
 from openai.types.chat import ChatCompletionSystemMessageParam
@@ -67,16 +67,18 @@ class LLMClient:
             return self.deepseek_client
         raise HTTPException(500, "Unsupported provider")
 
-    # HTTP status codes that indicate quota/billing exhaustion and should
-    # trigger fallback to the next provider in the chain.
-    _FALLBACK_STATUS_CODES = {429, 402}
+    # HTTP status codes that mean "this specific model is unavailable, the next
+    # one in the chain might work": quota/billing exhaustion (429, 402),
+    # model-not-found (404, e.g. a preview model was renamed upstream), and
+    # service-unavailable / high-demand overload (503, common on Gemini previews).
+    _FALLBACK_STATUS_CODES = {402, 404, 429, 503}
 
     @staticmethod
-    def _is_quota_error(exc: Exception) -> bool:
-        """Check if an exception (or its cause chain) is a quota/billing error (429 or 402)."""
+    def _is_fallback_error(exc: Exception) -> bool:
+        """Check if an exception (or its cause chain) should trigger chain fallback."""
         current: BaseException | None = exc
         while current is not None:
-            if isinstance(current, GeminiClientError) and getattr(current, "code", None) in LLMClient._FALLBACK_STATUS_CODES:
+            if isinstance(current, GeminiAPIError) and getattr(current, "code", None) in LLMClient._FALLBACK_STATUS_CODES:
                 return True
             if isinstance(current, OpenAIRateLimitError):
                 return True
@@ -117,15 +119,19 @@ class LLMClient:
                 return result  # type: ignore[return-value]
             except Exception as e:
                 last_exc = e
-                if self._is_quota_error(e):
+                if self._is_fallback_error(e):
                     logger.warning(
-                        "Quota/billing error on %s/%s, trying next: %s",
+                        "Fallback-eligible error on %s/%s, trying next: %s",
                         entry.provider.value,
                         entry.model,
                         e,
                     )
                     continue
-                # Non-429 → stop immediately
+                logger.exception(
+                    "LLM call failed on %s/%s with non-fallback error; aborting chain",
+                    entry.provider.value,
+                    entry.model,
+                )
                 break
         raise HTTPException(502, f"{error_context} is temporarily unavailable.") from last_exc
 
