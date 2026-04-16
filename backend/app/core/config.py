@@ -35,6 +35,19 @@ class Settings(BaseSettings):
 
     use_rag: bool = False
 
+    # RAG thresholds
+    rag_min_results: int = 3
+    rag_max_distance: float = 0.4
+    rag_user_boost: float = 0.7
+
+    # RAG retrieval sizing. At scale (thousands of users), a single global top-K
+    # would rarely surface the requesting user's own meals, so we fetch the two
+    # populations separately and merge. rag_max_context_meals caps the final set
+    # that reaches the LLM prompt — token cost is linear, quality gains plateau.
+    rag_own_user_fetch: int = 5
+    rag_global_fetch: int = 15
+    rag_max_context_meals: int = 8
+
     run_llm_tests: bool = False
 
 
