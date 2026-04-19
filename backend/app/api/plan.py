@@ -195,12 +195,12 @@ async def plan_meals_for_user(
             single_day: SingleDayResponse | None = None
             if settings.use_rag:
                 single_day = await generate_single_day_with_rag(
-                    day_req, session, current_user.id,  # type: ignore[arg-type]
+                    day_req, session, current_user.id, mock=current_user.is_demo,  # type: ignore[arg-type]
                 )
                 if single_day:
                     logger.info("Day %d: used RAG pipeline", day_index)
             if single_day is None:
-                single_day = await generate_single_day(day_req)
+                single_day = await generate_single_day(day_req, day_index=day_index, mock=current_user.is_demo)
             meal_plan.append(single_day)
 
             remaining_ingredients = subtract_used_from_fridge(remaining_ingredients, single_day.meals)
@@ -362,7 +362,7 @@ async def regenerate_plan(
         day_req.past_meals = past_meals
 
         try:
-            new_meals_response = await generate_partial_day(day_req, frozen_only, slots_to_generate)
+            new_meals_response = await generate_partial_day(day_req, frozen_only, slots_to_generate, mock=current_user.is_demo)
         except HTTPException:
             raise
         except Exception as e:

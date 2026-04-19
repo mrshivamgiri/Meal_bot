@@ -90,13 +90,14 @@ async def scan_receipt(
     user_language = current_user.language or "English"
 
     if is_pdf:
-        scan_result = await extract_items_from_pdf(pdf_bytes=file_bytes, language=user_language)
+        scan_result = await extract_items_from_pdf(pdf_bytes=file_bytes, language=user_language, mock=current_user.is_demo)
     else:
         image_base64 = base64.b64encode(file_bytes).decode("ascii")
         scan_result = await extract_items_from_receipt(
             image_base64=image_base64,
             image_media_type=file.content_type,
             language=user_language,
+            mock=current_user.is_demo,
         )
 
     # Normalize scanned names against existing fridge items
@@ -106,6 +107,7 @@ async def scan_receipt(
     items = await normalize_item_names(
         scan_result.items,
         [i.name for i in fridge_items],
+        mock=current_user.is_demo,
     )
 
     # Filter out ready_to_eat items if user doesn't track snacks

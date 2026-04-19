@@ -30,6 +30,7 @@ def _to_read(u: User) -> UserRead:
         include_spices=u.include_spices,
         track_snacks=u.track_snacks,
         onboarding_completed=u.onboarding_completed,
+        is_demo=u.is_demo,
     )
 
 
@@ -106,7 +107,8 @@ async def login(
         token_type="bearer",
         user_id=user.id,
         email=user.email,
-        onboarding_completed=bool(user.onboarding_completed)
+        onboarding_completed=bool(user.onboarding_completed),
+        is_demo=bool(user.is_demo),
     )
 
 
