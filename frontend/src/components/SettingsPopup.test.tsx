@@ -12,18 +12,43 @@ vi.mock('../api', () => ({
   updateUserProfile: vi.fn(),
 }));
 
-import { fetchUserProfile, updateUserProfile } from '../api';
+import { authFetch, fetchUserProfile, updateUserProfile } from '../api';
 
 const mockedFetchProfile = fetchUserProfile as ReturnType<typeof vi.fn>;
 const mockedUpdateProfile = updateUserProfile as ReturnType<typeof vi.fn>;
+const mockedAuthFetch = authFetch as ReturnType<typeof vi.fn>;
+
+// PreferencesForm fetches /countries and /languages. AuthProvider fetches /config.
+function stubAuthFetch() {
+  mockedAuthFetch.mockImplementation((url: string) => {
+    if (url === '/countries') {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ countries: ['Germany', 'France', 'Italy'] }),
+      });
+    }
+    if (url === '/languages') {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ languages: ['English', 'Czech', 'Spanish'] }),
+      });
+    }
+    if (url === '/config') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    return Promise.reject(new Error(`Unexpected authFetch: ${url}`));
+  });
+}
 
 const mockProfile = {
   id: 1,
   email: 'test@test.com',
   country: 'Germany',
+  language: 'English',
   measurement_system: 'metric' as const,
   variability: 'traditional' as const,
   include_spices: true,
+  track_snacks: true,
   onboarding_completed: true,
 };
 
@@ -49,6 +74,8 @@ function loginUser() {
 }
 
 beforeEach(() => {
+  mockedAuthFetch.mockReset();
+  stubAuthFetch();
   vi.stubGlobal(
     'location',
     Object.defineProperties(
@@ -141,6 +168,15 @@ describe('SettingsPopup', () => {
       expect(screen.getByDisplayValue('Germany')).toBeInTheDocument();
     });
 
+    // Wait for /countries fetch so the 'Germany' initial value passes the
+    // whitelist gate and the Save button is enabled.
+    await waitFor(() =>
+      expect(mockedAuthFetch).toHaveBeenCalledWith('/countries'),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /save/i })).toBeEnabled(),
+    );
+
     // Switch to experimental
     await user.click(screen.getByLabelText(/experimental/i));
     await user.click(screen.getByRole('button', { name: /save/i }));
@@ -148,8 +184,10 @@ describe('SettingsPopup', () => {
     await waitFor(() => {
       expect(mockedUpdateProfile).toHaveBeenCalledWith({
         country: 'Germany',
+        language: 'English',
         variability: 'experimental',
         include_spices: true,
+        track_snacks: true,
       });
     });
 
@@ -170,6 +208,9 @@ describe('SettingsPopup', () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue('Germany')).toBeInTheDocument();
     });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /save/i })).toBeEnabled(),
+    );
 
     await user.click(screen.getByRole('button', { name: /save/i }));
 

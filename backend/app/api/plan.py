@@ -17,6 +17,8 @@ from app.api.fridge import (
     restore_consumed_batches,
 )
 from app.core.config import settings
+from app.core.country_whitelist import normalize_country
+from app.core.language_whitelist import normalize_language
 from app.core.rate_limit import limiter
 from app.db import get_session
 from app.models.db_models import MealEntry, MealPlan, StockItem, User
@@ -167,8 +169,11 @@ async def plan_meals_for_user(
     session: AsyncSession = Depends(get_session),
 ) -> MealPlanResponse:
 
-    payload.country = current_user.country
-    payload.language = current_user.language
+    # Defense-in-depth: even though PATCH /api/users whitelists both fields,
+    # legacy rows (pre-whitelist) may hold arbitrary values. Normalize here
+    # before templating into the LLM system prompt.
+    payload.country = normalize_country(current_user.country or "")
+    payload.language = normalize_language(current_user.language or "") or "English"
 
     ms_raw = (current_user.measurement_system or "metric").strip().lower()
     if ms_raw not in ("none", "metric", "imperial"):
@@ -309,6 +314,12 @@ async def regenerate_plan(
         raise HTTPException(
             status_code=500, detail="Stored plan data could not be loaded."
         ) from exc
+
+    # Plans stored before the whitelists landed can carry arbitrary strings.
+    # Normalize before templating into the system prompt, same as
+    # plan_meals_for_user does for the live-user path.
+    original_req.language = normalize_language(original_req.language or "") or "English"
+    original_req.country = normalize_country(original_req.country or "")
 
     # 3) Build frozen set for fast lookup
     frozen_set: set[tuple[int, int]] = {

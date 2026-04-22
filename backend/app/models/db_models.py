@@ -13,8 +13,10 @@ class User(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    # Used for ingredient availability + local recipes
-    country: str | None = Field(default=None, index=True)
+    # Whitelisted against app.core.country_whitelist at the API layer. Capped
+    # at 60 chars to bound prompt-token use and match the longest canonical
+    # name ("Saint Vincent and the Grenadines" is 32 chars — 60 is ample).
+    country: str | None = Field(default=None, index=True, max_length=60)
 
     # "none" | "metric" | "imperial"
     measurement_system: str = Field(default="metric")
@@ -25,8 +27,10 @@ class User(SQLModel, table=True):
     # include spices in shopping list + stock
     include_spices: bool = Field(default=True)
 
-    # preferred output language for LLM responses
-    language: str = Field(default="English")
+    # preferred output language for LLM responses; whitelisted against
+    # app.core.language_whitelist at the API layer. Capped at 50 chars to
+    # bound prompt-token use and guard against pathological input.
+    language: str = Field(default="English", max_length=50)
 
     # include snacks/ready-to-eat items from receipt scans
     track_snacks: bool = Field(default=True)

@@ -12,9 +12,33 @@ vi.mock('../api', () => ({
   updateUserProfile: vi.fn(),
 }));
 
-import { updateUserProfile } from '../api';
+import { authFetch, updateUserProfile } from '../api';
 
 const mockedUpdateProfile = updateUserProfile as ReturnType<typeof vi.fn>;
+const mockedAuthFetch = authFetch as ReturnType<typeof vi.fn>;
+
+// PreferencesForm fetches /countries and /languages on mount to validate the
+// picker input against the backend whitelists. AuthProvider fetches /config.
+function stubAuthFetch() {
+  mockedAuthFetch.mockImplementation((url: string) => {
+    if (url === '/countries') {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ countries: ['Germany', 'France', 'Italy'] }),
+      });
+    }
+    if (url === '/languages') {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ languages: ['English', 'Czech', 'Spanish'] }),
+      });
+    }
+    if (url === '/config') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    return Promise.reject(new Error(`Unexpected authFetch: ${url}`));
+  });
+}
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -38,6 +62,8 @@ function loginUser() {
 }
 
 beforeEach(() => {
+  mockedAuthFetch.mockReset();
+  stubAuthFetch();
   vi.stubGlobal(
     'location',
     Object.defineProperties(
@@ -84,9 +110,17 @@ describe('OnboardingModal', () => {
 
     render(<OnboardingModal />, { wrapper: createWrapper() });
 
+    // Wait for /countries to populate so 'Germany' passes the whitelist gate.
+    await waitFor(() =>
+      expect(mockedAuthFetch).toHaveBeenCalledWith('/countries'),
+    );
+
     const countryInput = screen.getByPlaceholderText(/start typing to search/i);
     await user.type(countryInput, 'Germany');
 
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /get started/i })).toBeEnabled(),
+    );
     await user.click(screen.getByRole('button', { name: /get started/i }));
 
     await waitFor(() => {
