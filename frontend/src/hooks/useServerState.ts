@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import type { StockItem, MealPlanRequest, MealPlanResponse, MealPlanSummary, MealEntrySummary, RegeneratePlanRequest, UserProfile, FinishPlanResponse } from '../types';
-import { authFetch, fetchUserProfile, mergeFridgeItems, scanReceipt, updateUserProfile } from '../api';
+import type { StockItem, MealPlanRequest, MealPlanResponse, MealPlanSummary, MealEntrySummary, RegeneratePlanRequest, UserProfile, FinishPlanResponse, SingleRecipeRequest, CookRecipeRequest } from '../types';
+import { authFetch, cookRecipe, fetchUserProfile, generateRecipe, mergeFridgeItems, scanReceipt, updateUserProfile } from '../api';
 
 // --- Queries (Data Fetching) ---
 
@@ -35,6 +35,28 @@ export function useUpdateUserProfile() {
       updateUserProfile(data),
     onSuccess: () => {
       return queryClient.invalidateQueries({ queryKey: ['userProfile'] });
+    },
+  });
+}
+
+export function useGenerateRecipe() {
+  return useMutation({
+    mutationFn: (payload: SingleRecipeRequest) => generateRecipe(payload),
+  });
+}
+
+export function useCookRecipe() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: CookRecipeRequest) => cookRecipe(payload),
+    onSuccess: () => {
+      // Fridge is debited and a new 1-day plan row is created. Invalidate
+      // both so the sidebar catalog (usePlanList → ['planList']) and the
+      // fridge UI (useFridge → ['fridge']) pick up the side effects.
+      // MealEntry queries are keyed by planId so there's no cross-plan
+      // cache to invalidate here.
+      queryClient.invalidateQueries({ queryKey: ['fridge'] });
+      queryClient.invalidateQueries({ queryKey: ['planList'] });
     },
   });
 }

@@ -36,7 +36,6 @@ export interface PlannedMeal {
   // string fallback so old plans still render.
   meal_type: MealType | string;
   meal_type_label?: string;
-  uses_existing_ingredients: string[];
   ingredients: IngredientAmount[];
   steps: string[];
   total_time_minutes?: number | null;
@@ -99,6 +98,26 @@ export interface MealEntrySummary {
   meal_type: string;
   cooked_at: string | null;
   rating: number | null;
+}
+
+// Phase 4: Cook Now request/response
+export interface SingleRecipeRequest {
+  meal_type: MealType;
+  diet_type: DietType | null;
+  people_count: number;
+  taste_preferences: string[];
+  avoid_ingredients: string[];
+  ingredients_to_use: string[];
+  stock_only: boolean;
+  note: string | null;
+}
+
+export interface CookRecipeRequest extends SingleRecipeRequest {
+  recipe: PlannedMeal;
+}
+
+export interface SingleRecipeResponse {
+  recipe: PlannedMeal;
 }
 
 export type ScannedItemType = "ingredient" | "ready_to_eat";
