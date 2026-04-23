@@ -4,19 +4,12 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import ValidationError
 from sqlalchemy import delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.api.deps import get_current_user
-from app.api.fridge import (
-    _allocate_fifo,
-    _group_and_sort_fridge,
-    get_fridge_items,
-    replace_fridge_items,
-    restore_consumed_batches,
-)
-from app.core.config import settings
 from app.core.country_whitelist import normalize_country
 from app.core.language_whitelist import normalize_language
 from app.core.rate_limit import limiter, user_id_key_func
@@ -30,16 +23,26 @@ from app.models.plan_models import (
     MealPlanRequest,
     MealPlanResponse,
     MealPlanSummary,
-    PlannedMeal,
     RateMealRequest,
     RegeneratePlanRequest,
     SingleDayResponse,
     StockItemDTO,
 )
-from app.services.meal_planner import (
-    generate_partial_day,
-    generate_single_day,
-    generate_single_day_with_rag,
+from app.services.fridge_service import (
+    allocate_fifo,
+    get_fridge_items,
+    group_and_sort_fridge,
+    replace_fridge_items,
+    restore_consumed_batches,
+)
+from app.services.meal_planner import generate_partial_day
+from app.services.plan_service import (
+    PlanGenerationError,
+    clear_unconfirmed_plans,
+    derive_plan_status,
+    generate_plan_days,
+    parse_meal_ingredients,
+    persist_meal_entries,
 )
 from app.services.recipe_retriever import embed_meal_entry
 from app.utils import compute_shopping_list_from_plan, subtract_used_from_fridge
@@ -49,19 +52,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/plan", tags=["plan"])
 MeasurementSystem = Literal["none", "metric", "imperial"]
 Variability = Literal["traditional", "experimental"]
-
-
-def _derive_status(
-    total: int, cooked: int, finished_at: datetime | None = None,
-) -> Literal["planned", "active", "cooked", "finished"]:
-    """Derive plan status from meal entry counts and finished_at."""
-    if finished_at is not None:
-        return "finished"
-    if total == 0 or cooked == 0:
-        return "planned"
-    if cooked >= total:
-        return "cooked"
-    return "active"
 
 
 # GET /api/plan — List user's plans
@@ -99,7 +89,7 @@ async def list_plans(
             days=plan.days,
             meals_per_day=plan.meals_per_day,
             people_count=plan.people_count,
-            status=_derive_status(total_meals, cooked_meals, plan.finished_at),
+            status=derive_plan_status(total_meals, cooked_meals, plan.finished_at),
             total_meals=total_meals,
             cooked_meals=cooked_meals,
             finished_at=plan.finished_at,
@@ -123,7 +113,7 @@ async def get_plan_detail(
 
     try:
         plan_obj = MealPlanResponse.model_validate_json(plan.response_json)
-    except Exception as exc:
+    except ValidationError as exc:
         logger.exception("Failed to parse response_json for plan %d", plan_id)
         raise HTTPException(
             status_code=500,
@@ -187,61 +177,15 @@ async def plan_meals_for_user(
 
     payload.include_spices = bool(current_user.include_spices)
 
-    # Load fridge from DB
-    result = await session.execute(
-        select(StockItem).where(StockItem.user_id == current_user.id)
-    )
-    db_items = result.scalars().all()
-
-    remaining_ingredients: list[StockItemDTO] = [
-        StockItemDTO(name=item.name, quantity_grams=item.quantity_grams, need_to_use=item.need_to_use)
-        for item in db_items
-    ]
-
-    initial_fridge: list[StockItemDTO] = [
-        ing.model_copy() for ing in remaining_ingredients
-    ]
-
-    past_meals: list[str] = list(payload.past_meals)
-    meal_plan: list[SingleDayResponse] = []
-
     try:
-        for day_index in range(1, days + 1):
-            day_req = payload.model_copy()
-            day_req.stock_items = remaining_ingredients
-            day_req.past_meals = past_meals
-
-            single_day: SingleDayResponse | None = None
-            if settings.use_rag:
-                single_day = await generate_single_day_with_rag(
-                    day_req, session, current_user.id, mock=current_user.is_demo,  # type: ignore[arg-type]
-                )
-                if single_day:
-                    logger.info("Day %d: used RAG pipeline", day_index)
-            if single_day is None:
-                single_day = await generate_single_day(day_req, day_index=day_index, mock=current_user.is_demo)
-            meal_plan.append(single_day)
-
-            remaining_ingredients = subtract_used_from_fridge(remaining_ingredients, single_day.meals)
-            past_meals.extend(m.name for m in single_day.meals)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Plan generation failed at day %d", day_index)
+        meal_plan, shopping_items, _initial_fridge = await generate_plan_days(
+            session, current_user, payload, days,
+        )
+    except PlanGenerationError as exc:
         raise HTTPException(
             status_code=502,
             detail="Meal plan generation failed. Please try again.",
-        ) from e
-
-    shopping_items: list[IngredientAmount] = compute_shopping_list_from_plan(meal_plan, initial_fridge)
-    if payload.stock_only:
-        if shopping_items:
-            logger.warning(
-                "stock_only plan produced %d non-stock items — LLM hallucinated ingredients: %s",
-                len(shopping_items),
-                [item.name for item in shopping_items],
-            )
-        shopping_items = []
+        ) from exc
 
     response_obj = MealPlanResponse(
         plan_id=None,
@@ -250,23 +194,8 @@ async def plan_meals_for_user(
     )
 
     # Clean up old unconfirmed plans before saving a new one
-    await session.execute(
-        delete(MealEntry).where(
-            MealEntry.user_id == current_user.id,  # type: ignore[arg-type]
-            MealEntry.meal_plan_id.in_(  # type: ignore[union-attr,attr-defined]
-                select(MealPlan.id).where(
-                    MealPlan.user_id == current_user.id,
-                    MealPlan.confirmed_at.is_(None),  # type: ignore[union-attr]
-                )
-            ),
-        )
-    )
-    await session.execute(
-        delete(MealPlan).where(
-            MealPlan.user_id == current_user.id,  # type: ignore[arg-type]
-            MealPlan.confirmed_at.is_(None),  # type: ignore[union-attr]
-        )
-    )
+    assert current_user.id is not None
+    await clear_unconfirmed_plans(session, current_user.id)
 
     # Save MealPlan to DB (no MealEntry rows yet — created on confirm)
     plan = MealPlan(
@@ -309,7 +238,7 @@ async def regenerate_plan(
     try:
         original_req = MealPlanRequest.model_validate_json(plan.request_json)
         original_resp = MealPlanResponse.model_validate_json(plan.response_json)
-    except Exception as exc:
+    except ValidationError as exc:
         logger.exception("Failed to parse stored data for plan %d", plan_id)
         raise HTTPException(
             status_code=500, detail="Stored plan data could not be loaded."
@@ -482,7 +411,7 @@ async def confirm_plan(
     # Parse stored plan response
     try:
         plan_obj = MealPlanResponse.model_validate_json(plan.response_json)
-    except Exception as exc:
+    except ValidationError as exc:
         logger.exception("Failed to parse response_json for plan %d during confirm", plan_id)
         raise HTTPException(
             status_code=500,
@@ -494,13 +423,13 @@ async def confirm_plan(
     # is what lets finish_plan restore an uncooked meal's ingredients to their
     # original dated bucket instead of dropping them into a None-dated one.
     fridge = await get_fridge_items(session, current_user.id)
-    batches_by_name = _group_and_sort_fridge(fridge)
+    batches_by_name = group_and_sort_fridge(fridge)
     snapshots: dict[tuple[int, int], list[ConsumedBatch]] = {}
 
     for day_index, day in enumerate(plan_obj.days, start=1):
         for meal_index, meal in enumerate(day.meals, start=1):
             meal_ingredients = [ing for ing in meal.ingredients if not ing.is_spice]
-            allocations = _allocate_fifo(batches_by_name, meal_ingredients)
+            allocations = allocate_fifo(batches_by_name, meal_ingredients)
             snapshots[(day_index, meal_index)] = allocations
 
     final_state = [
@@ -513,7 +442,7 @@ async def confirm_plan(
 
     # Create meal entries — all start UNCOOKED (ingredients already reserved via fridge subtraction)
     now = datetime.now(UTC)
-    _persist_meal_entries(
+    persist_meal_entries(
         session, user_id=current_user.id, plan_id=plan_id,
         plan_obj=plan_obj, cooked_at=None, consumption_snapshots=snapshots,
     )
@@ -756,15 +685,25 @@ async def finish_plan(
                     ConsumedBatch.model_validate(b) for b in raw
                 )
                 continue
-            except Exception:
+            except (json.JSONDecodeError, ValidationError):
                 logger.exception(
                     "Corrupt consumed_snapshot_json on meal entry %d — falling back to lossy restore",
                     entry.id,
                 )
-        batches_to_restore.extend(
-            ConsumedBatch(name=ing.name, quantity_grams=ing.quantity_grams)
-            for ing in _parse_meal_ingredients(entry)
-        )
+        # Legacy fallback: entries without a snapshot (or with a corrupt one
+        # that fell through above). meal_json itself can also be corrupt for
+        # legacy rows — guard here so one bad entry doesn't 500 the whole
+        # finish and strand the user.
+        try:
+            batches_to_restore.extend(
+                ConsumedBatch(name=ing.name, quantity_grams=ing.quantity_grams)
+                for ing in parse_meal_ingredients(entry)
+            )
+        except ValidationError:
+            logger.exception(
+                "Corrupt meal_json on meal entry %d — skipping its ingredients in restore",
+                entry.id,
+            )
 
     if batches_to_restore:
         await restore_consumed_batches(session, current_user.id, batches_to_restore)
@@ -781,54 +720,3 @@ async def finish_plan(
     )
 
 
-def _parse_meal_ingredients(entry: MealEntry) -> list[IngredientAmount]:
-    """Parse a MealEntry's JSON back into ingredient list (excluding spices)."""
-    meal = PlannedMeal.model_validate_json(entry.meal_json)
-    return [ing for ing in meal.ingredients if not ing.is_spice]
-
-
-def _persist_meal_entries(
-    session: AsyncSession,
-    user_id: int,
-    plan_id: int,
-    plan_obj: MealPlanResponse,
-    cooked_at: datetime | None = None,
-    consumption_snapshots: dict[tuple[int, int], list[ConsumedBatch]] | None = None,
-) -> None:
-    """Stage meal entries into the session. Caller must await session.commit().
-
-    `consumption_snapshots` keys are 1-based (day_index, meal_index) tuples
-    matching the indices used below; values are the per-meal fridge debits
-    captured by `_allocate_fifo` at confirm time. Pass None for non-confirm
-    callers — entries get NULL `consumed_snapshot_json` and finish_plan will
-    use its legacy restore path.
-
-    This function is intentionally synchronous. session.add_all() only stages
-    objects in memory — no I/O occurs until the caller awaits session.commit().
-    """
-    entries: list[MealEntry] = []
-
-    for day_index, day in enumerate(plan_obj.days, start=1):
-        for meal_index, meal in enumerate(day.meals, start=1):
-            snapshot_json: str | None = None
-            if consumption_snapshots is not None:
-                batches = consumption_snapshots.get((day_index, meal_index), [])
-                snapshot_json = json.dumps(
-                    [b.model_dump(mode="json") for b in batches]
-                )
-            entries.append(
-                MealEntry(
-                    user_id=user_id,
-                    meal_plan_id=plan_id,
-                    day_index=day_index,
-                    meal_index=meal_index,
-                    name=meal.name,
-                    meal_type=meal.meal_type,
-                    meal_json=meal.model_dump_json(),
-                    cooked_at=cooked_at,
-                    consumed_snapshot_json=snapshot_json,
-                )
-            )
-
-    if entries:
-        session.add_all(entries)

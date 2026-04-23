@@ -9,8 +9,6 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.api.fridge import _allocate_fifo, _group_and_sort_fridge
-from app.api.plan import _derive_status
 from app.models.db_models import MealEntry, MealPlan, User
 from app.models.plan_models import (
     ConsumedBatch,
@@ -19,6 +17,8 @@ from app.models.plan_models import (
     SingleDayResponse,
     StockItemDTO,
 )
+from app.services.fridge_service import allocate_fifo, group_and_sort_fridge
+from app.services.plan_service import derive_plan_status
 
 
 def _fake_day_with_ingredients(ingredients: list[tuple[str, float]]) -> SingleDayResponse:
@@ -69,7 +69,7 @@ class TestPlanValidation:
 
 
 class TestConfirmEdgeCases:
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_confirm_depletes_fridge_item_fully(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict
     ):
@@ -97,7 +97,7 @@ class TestConfirmEdgeCases:
         names = [x["name"] for x in fridge]
         assert "chicken breast" not in names
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_confirm_ingredient_not_in_fridge(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict
     ):
@@ -128,7 +128,7 @@ class TestConfirmEdgeCases:
 
 
 class TestRegenerateEdgeCases:
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_regenerate_all_frozen_returns_unchanged(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict
     ):
@@ -159,7 +159,7 @@ class TestRegenerateEdgeCases:
         assert regen_resp.status_code == 200
         assert regen_resp.json()["days"][0]["meals"][0]["name"] == "Only Meal"
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_regenerate_invalid_day_index(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict
     ):
@@ -188,7 +188,7 @@ class TestRegenerateEdgeCases:
         )
         assert regen_resp.status_code == 422
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_regenerate_invalid_meal_index(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict
     ):
@@ -227,7 +227,7 @@ class TestRegenerateEdgeCases:
         )
         assert regen_resp.status_code == 404
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     @patch("app.api.plan.generate_partial_day", new_callable=AsyncMock)
     async def test_regenerate_none_frozen_replaces_all(
         self, mock_partial: AsyncMock, mock_gen: AsyncMock,
@@ -265,7 +265,7 @@ class TestRegenerateEdgeCases:
         assert regen_resp.status_code == 200
         assert regen_resp.json()["days"][0]["meals"][0]["name"] == "Replacement Meal"
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_regenerate_confirmed_plan_rejected(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
@@ -326,7 +326,7 @@ class TestCorruptedPlanData:
 
 
 class TestFinishPlan:
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_finish_with_uncooked_meals_returns_ingredients(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
@@ -355,7 +355,7 @@ class TestFinishPlan:
         assert body["status"] == "finished"
         assert body["returned_meals"] == 1
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_finish_already_finished_is_idempotent(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
@@ -376,7 +376,7 @@ class TestFinishPlan:
         assert resp2.status_code == 200
         assert resp2.json()["status"] == "finished"
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_finish_unconfirmed_plan_rejected(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
@@ -394,7 +394,57 @@ class TestFinishPlan:
         )
         assert finish_resp.status_code == 409
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    async def test_finish_skips_entry_with_corrupt_meal_json(
+        self, client: AsyncClient, auth_headers: dict,
+        test_user: User, db_session: AsyncSession,
+    ):
+        """A legacy uncooked entry with corrupt meal_json must not 500 the finish.
+
+        Before the fallback was guarded, parse_meal_ingredients() would let
+        ValidationError propagate and the user could never finish the plan.
+        Now the corrupt entry is logged and skipped; the plan still finishes.
+        """
+        plan = MealPlan(
+            user_id=test_user.id,
+            days=1,
+            meals_per_day=1,
+            people_count=2,
+            request_json="{}",
+            response_json='{"plan_id":null,"days":[],"shopping_list":[]}',
+            confirmed_at=datetime.now(UTC),
+        )
+        db_session.add(plan)
+        await db_session.flush()
+
+        # Legacy entry: NULL consumed_snapshot_json + corrupt meal_json.
+        bad_entry = MealEntry(
+            user_id=test_user.id,
+            meal_plan_id=plan.id,
+            day_index=1,
+            meal_index=1,
+            name="Corrupt Legacy Meal",
+            meal_type="lunch",
+            meal_json="NOT VALID JSON {{{",
+            cooked_at=None,
+            consumed_snapshot_json=None,
+        )
+        db_session.add(bad_entry)
+        await db_session.flush()
+
+        finish_resp = await client.post(
+            f"/api/plan/{plan.id}/finish", headers=auth_headers,
+        )
+        assert finish_resp.status_code == 200, (
+            f"corrupt meal_json on a legacy entry stranded finish_plan: "
+            f"{finish_resp.status_code} {finish_resp.text}"
+        )
+        body = finish_resp.json()
+        assert body["status"] == "finished"
+        # returned_meals counts the uncooked entries walked, not the ones
+        # successfully restored — matches the existing semantic.
+        assert body["returned_meals"] == 1
+
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_finish_all_cooked_returns_zero(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
@@ -434,7 +484,7 @@ class TestRateLimiting:
         yield
         limiter.enabled = False
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_plan_rate_limit_enforced(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
@@ -459,24 +509,24 @@ class TestRateLimiting:
 
 class TestDeriveStatus:
     def test_planned_when_no_meals_cooked(self):
-        assert _derive_status(total=3, cooked=0) == "planned"
+        assert derive_plan_status(total=3, cooked=0) == "planned"
 
     def test_planned_when_total_is_zero(self):
-        assert _derive_status(total=0, cooked=0) == "planned"
+        assert derive_plan_status(total=0, cooked=0) == "planned"
 
     def test_active_when_partially_cooked(self):
-        assert _derive_status(total=3, cooked=1) == "active"
+        assert derive_plan_status(total=3, cooked=1) == "active"
 
     def test_cooked_when_all_cooked(self):
-        assert _derive_status(total=3, cooked=3) == "cooked"
+        assert derive_plan_status(total=3, cooked=3) == "cooked"
 
     def test_finished_when_finished_at_set(self):
         now = datetime.now(UTC)
-        assert _derive_status(total=3, cooked=1, finished_at=now) == "finished"
+        assert derive_plan_status(total=3, cooked=1, finished_at=now) == "finished"
 
     def test_finished_overrides_cooked(self):
         now = datetime.now(UTC)
-        assert _derive_status(total=3, cooked=3, finished_at=now) == "finished"
+        assert derive_plan_status(total=3, cooked=3, finished_at=now) == "finished"
 
 
 # Far-future date keeps get_fridge_items' auto-need-to-use threshold inert.
@@ -486,12 +536,12 @@ _FAR_DATE_2 = date(2099, 4, 30)
 
 
 class TestConsumedSnapshot:
-    def test_allocate_fifo_single_batch_full_deduction(self):
+    def testallocate_fifo_single_batch_full_deduction(self):
         fridge = [
             StockItemDTO(name="tomato", quantity_grams=200, expiration_date=_FAR_DATE)
         ]
-        by_name = _group_and_sort_fridge(fridge)
-        allocs = _allocate_fifo(by_name, [IngredientAmount(name="tomato", quantity_grams=200)])
+        by_name = group_and_sort_fridge(fridge)
+        allocs = allocate_fifo(by_name, [IngredientAmount(name="tomato", quantity_grams=200)])
 
         assert len(allocs) == 1
         assert allocs[0].quantity_grams == 200
@@ -499,28 +549,28 @@ class TestConsumedSnapshot:
         # Source batch should be drained to 0
         assert by_name["tomato"][0].quantity_grams == 0
 
-    def test_allocate_fifo_multi_batch_partial_deduction(self):
+    def testallocate_fifo_multi_batch_partial_deduction(self):
         # Earlier expiration should be drained first (FIFO)
         fridge = [
             StockItemDTO(name="tomato", quantity_grams=80, expiration_date=_FAR_DATE_2),
             StockItemDTO(name="tomato", quantity_grams=100, expiration_date=_FAR_DATE),
         ]
-        by_name = _group_and_sort_fridge(fridge)
-        allocs = _allocate_fifo(by_name, [IngredientAmount(name="tomato", quantity_grams=150)])
+        by_name = group_and_sort_fridge(fridge)
+        allocs = allocate_fifo(by_name, [IngredientAmount(name="tomato", quantity_grams=150)])
 
         assert [a.quantity_grams for a in allocs] == [100, 50]
         assert [a.expiration_date for a in allocs] == [_FAR_DATE, _FAR_DATE_2]
 
-    def test_allocate_fifo_no_matching_batch_returns_empty(self):
+    def testallocate_fifo_no_matching_batch_returns_empty(self):
         fridge = [StockItemDTO(name="rice", quantity_grams=300)]
-        by_name = _group_and_sort_fridge(fridge)
-        allocs = _allocate_fifo(by_name, [IngredientAmount(name="tofu", quantity_grams=100)])
+        by_name = group_and_sort_fridge(fridge)
+        allocs = allocate_fifo(by_name, [IngredientAmount(name="tofu", quantity_grams=100)])
 
         assert allocs == []
         # Untouched ingredient stays put
         assert by_name["rice"][0].quantity_grams == 300
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_confirm_writes_consumed_snapshot_per_meal(
         self, mock_gen: AsyncMock,
         client: AsyncClient, auth_headers: dict, db_session: AsyncSession,
@@ -574,7 +624,7 @@ class TestConsumedSnapshot:
             assert batches[0].expiration_date == _FAR_DATE
             assert batches[0].need_to_use is True
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_finish_restores_expiration_date_for_uncooked(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
@@ -609,7 +659,7 @@ class TestConsumedSnapshot:
         assert tomatoes[0]["expiration_date"] == _FAR_EXP
         assert tomatoes[0]["need_to_use"] is True
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_finish_restores_multi_batch_correctly(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
@@ -642,7 +692,7 @@ class TestConsumedSnapshot:
             _FAR_DATE_2.isoformat(): 100,
         }
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_finish_falls_back_for_legacy_entry_without_snapshot(
         self, mock_gen: AsyncMock,
         client: AsyncClient, auth_headers: dict, db_session: AsyncSession,
@@ -684,7 +734,7 @@ class TestConsumedSnapshot:
         by_exp = {x["expiration_date"]: x["quantity_grams"] for x in fridge if x["name"] == "tomato"}
         assert by_exp == {_FAR_EXP: 100, None: 100}
 
-    @patch("app.api.plan.generate_single_day", new_callable=AsyncMock)
+    @patch("app.services.plan_service.generate_single_day", new_callable=AsyncMock)
     async def test_finish_idempotent_with_snapshot(
         self, mock_gen: AsyncMock, client: AsyncClient, auth_headers: dict,
     ):
