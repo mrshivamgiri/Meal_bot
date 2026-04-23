@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { LoginResponse, AuthState } from "../types";
 import {authFetch} from "../api.ts";
 import { usePreferencesStore } from "../store/usePreferencesStore";
+import { AutoLoginAfterRegisterError } from "./authErrors";
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
 
@@ -19,20 +20,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isDemo, setIsDemo] = useState<boolean>(
     () => window.localStorage.getItem("mealbot_is_demo") === "true"
   );
-  const [demoEnabled, setDemoEnabled] = useState<boolean>(false);
+  // null = /config not yet resolved; boolean = resolved value. Using null
+  // as the unresolved sentinel lets the UI avoid a flash of the wrong
+  // copy (e.g. rendering the "closed alpha" notice for the 50-200ms
+  // round-trip on deployments where registration is actually open).
+  const [demoEnabled, setDemoEnabled] = useState<boolean | null>(null);
+  const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    // Gate the "Try Demo" button on the backend feature flag so we don't
-    // advertise a demo that will 404. Failure → keep button hidden.
-    // Wrapped in Promise.resolve() so tests that replace authFetch with
-    // vi.fn() (returns undefined) don't blow up at mount.
+    // Gate the "Try Demo" and "Register" buttons on backend feature flags so
+    // we don't advertise features that would 4xx. Failure → resolve both to
+    // false (safer default: hide everything we can't confirm is enabled).
+    // Promise.resolve() wrap keeps tests that replace authFetch with
+    // vi.fn() (returns undefined) safe.
     Promise.resolve(authFetch("/config"))
       .then((r) => (r?.ok ? r.json() : null))
-      .then((data: { demo_mode?: boolean } | null) => {
-        if (data?.demo_mode) setDemoEnabled(true);
+      .then((data: { demo_mode?: boolean; registration_enabled?: boolean } | null) => {
+        setDemoEnabled(Boolean(data?.demo_mode));
+        setRegistrationEnabled(Boolean(data?.registration_enabled));
       })
-      .catch(() => { /* leave demoEnabled=false */ });
+      .catch(() => {
+        setDemoEnabled(false);
+        setRegistrationEnabled(false);
+      });
   }, []);
 
   const setOnboardingCompleted = (value: boolean) => {
@@ -76,6 +87,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     return data;
+  };
+
+  const register = async (newEmail: string, password: string): Promise<LoginResponse> => {
+    // POST /users/register returns 201 with a plain message, not a token, so
+    // we auto-login immediately after so the UI lands on an authenticated
+    // session without a second user interaction.
+    const resp = await authFetch("/users/register", {
+      method: "POST",
+      body: JSON.stringify({ email: newEmail, password }),
+    });
+    if (!resp.ok) {
+      // 403 when registration_enabled flipped server-side between /config
+      // and submit; 4xx for duplicate email / weak password (backend
+      // rejects per its own rules).
+      throw new Error(`Registration failed: ${resp.status}`);
+    }
+    // Distinguish a login-phase failure from a register-phase failure so
+    // the caller can tell the user "your account was created, just sign
+    // in" instead of "registration failed" (which would prompt them to
+    // try again and hit a 409).
+    try {
+      return await login(newEmail, password);
+    } catch (err) {
+      throw new AutoLoginAfterRegisterError(err);
+    }
   };
 
   const loginDemo = async (): Promise<void> => {
@@ -138,7 +174,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ userId, token, email, onboardingCompleted, isDemo, demoEnabled, login, logout, setOnboardingCompleted, loginDemo }}>
+    <AuthContext.Provider value={{ userId, token, email, onboardingCompleted, isDemo, demoEnabled, registrationEnabled, login, logout, setOnboardingCompleted, loginDemo, register }}>
       {children}
     </AuthContext.Provider>
   );
