@@ -143,9 +143,14 @@ export function useConfirmPlan() {
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (_, planId) => {
       queryClient.invalidateQueries({ queryKey: ['planList'] });
       queryClient.invalidateQueries({ queryKey: ['fridge'] });
+      // Confirm creates the meal entry rows server-side. Without this,
+      // an un-confirm → regenerate → re-confirm cycle leaves the cache
+      // holding the empty array refetched during un-confirm, so per-meal
+      // cook buttons and rating UI never appear.
+      queryClient.invalidateQueries({ queryKey: ['mealEntries', planId] });
     },
   });
 }
@@ -201,6 +206,58 @@ export function useRateMeal() {
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['planList'] });
       queryClient.invalidateQueries({ queryKey: ['mealEntries', variables.planId] });
+    },
+  });
+}
+
+// Reads the FastAPI `detail` field on non-OK responses so 409s surface
+// useful messages (e.g. "Not enough chicken in fridge to reopen...") instead
+// of a bare status code. Falls back to the status if the body isn't JSON.
+async function extractErrorDetail(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json();
+    if (body && typeof body.detail === "string") return body.detail;
+  } catch {
+    // body wasn't JSON — fall through
+  }
+  return `${fallback}: ${res.status}`;
+}
+
+export function useUnconfirmPlan() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (planId: number): Promise<StockItem[]> => {
+      const res = await authFetch(`/plan/${planId}/unconfirm`, { method: "POST" });
+      if (!res.ok) throw new Error(await extractErrorDetail(res, "Un-confirm failed"));
+      return res.json();
+    },
+    onSuccess: (_, planId) => {
+      queryClient.invalidateQueries({ queryKey: ['planList'] });
+      queryClient.invalidateQueries({ queryKey: ['fridge'] });
+      // Server deletes all meal entries; clear the cache so any reader
+      // outside the isConfirmed gate doesn't see stale rows.
+      queryClient.invalidateQueries({ queryKey: ['mealEntries', planId] });
+    },
+  });
+}
+
+export function useReopenPlan() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (planId: number): Promise<StockItem[]> => {
+      const res = await authFetch(`/plan/${planId}/reopen`, { method: "POST" });
+      if (!res.ok) throw new Error(await extractErrorDetail(res, "Reopen failed"));
+      return res.json();
+    },
+    onSuccess: (_, planId) => {
+      queryClient.invalidateQueries({ queryKey: ['planList'] });
+      queryClient.invalidateQueries({ queryKey: ['fridge'] });
+      // Reopen rewrites consumed_snapshot_json on uncooked entries; the
+      // cached MealEntrySummary doesn't expose it, but invalidate for
+      // consistency with other plan-state mutations.
+      queryClient.invalidateQueries({ queryKey: ['mealEntries', planId] });
     },
   });
 }
