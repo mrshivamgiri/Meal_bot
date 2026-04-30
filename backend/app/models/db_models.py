@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime
 
 from pgvector.sqlalchemy import Vector  # type: ignore[import-untyped]
-from sqlalchemy import Index
+from sqlalchemy import Boolean, Index
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Column, Field, Relationship, SQLModel, String
 
@@ -119,7 +119,18 @@ class MealEntry(SQLModel, table=True):
         default_factory=lambda: datetime.now(UTC)
     )
     cooked_at: datetime | None = Field(default=None)
-    rating: int | None = Field(default=None)
+    # Cookbook membership: starring a meal sets this True and triggers embedding
+    # generation; un-starring clears both. Replaces the legacy 1–5 rating column —
+    # we lost the granularity intentionally to keep the cookbook UX a single bit.
+    #
+    # No standalone index here — the composite (user_id, is_favorite) index
+    # created in migration o5p6q7r8s9t0 covers every hot path (cookbook list,
+    # count, RAG threshold check). Keeping index=True would make Alembic
+    # autogenerate add a redundant single-column index next time it runs.
+    is_favorite: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
     # Keep details as JSON for now (ingredients, steps, etc.)
     meal_json: str = Field(
         description="Full PlannedMeal JSON (ingredients, steps, etc.)."
@@ -131,7 +142,7 @@ class MealEntry(SQLModel, table=True):
     # those — expiration_date and need_to_use are not recoverable.
     consumed_snapshot_json: str | None = Field(default=None)
 
-    # RAG embedding — 384d from all-MiniLM-L6-v2, generated when rated 4+
+    # RAG embedding — 384d from all-MiniLM-L6-v2, generated when is_favorite=True
     embedding: list[float] | None = Field(
         default=None, sa_column=Column(Vector(384), nullable=True)
     )
