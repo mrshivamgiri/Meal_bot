@@ -63,7 +63,29 @@ class Settings(BaseSettings):
 
     registration_enabled: bool = False
 
-    access_token_expire_minutes: int = 60 * 24  # 24 hours
+    # Short-lived access JWT lives in an HttpOnly cookie. 15 min bounds the
+    # window of a stolen access token; refresh keeps active sessions alive
+    # without re-prompting the user.
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 30
+
+    # Grace window for refresh-token rotation collisions. Two tabs that both
+    # have an expired access token will race to /auth/refresh — the loser
+    # finds the row already revoked and would otherwise trigger the theft
+    # alarm. If the row was revoked within this many seconds AND has a
+    # replaced_by_id, treat it as a benign tab race and mint the caller a
+    # fresh session instead. Tight enough that real exfil-and-replay
+    # (minutes-to-hours) still trips the alarm.
+    refresh_grace_seconds: int = 10
+
+    # Cookie attributes — apply to mealbot_at, mealbot_rt, mealbot_csrf.
+    # secure=True requires HTTPS at the browser. Same-origin in dev (Vite
+    # proxy) means SameSite=Lax is sufficient — no need for SameSite=None.
+    cookie_secure: bool = True
+    cookie_samesite: str = "lax"
+
+    # Double-submit-cookie CSRF middleware. Off only as an emergency lever.
+    csrf_enabled: bool = True
 
     db_echo: bool = False
 
