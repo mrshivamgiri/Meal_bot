@@ -1,79 +1,448 @@
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
+  /* Fonts */
+  --apple-font-heading: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --apple-font-body: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* Colors from branding JSON */
+  --apple-blue: #0066CC;
+  --apple-accent: #2997FF;
+  --apple-bg: #FFFFFF;
+  --apple-text-primary: #1d1d1f; /* Premium dark gray for text contrast */
+  --apple-text-secondary: #707070; /* Branding textPrimary */
+  --apple-text-muted: #86868b;
+  --apple-link: #2997FF;
+
+  /* iOS UI Elements */
+  --apple-bg-secondary: #F5F5F7;
+  --apple-bg-tertiary: #E8E8ED;
+  --apple-border: rgba(0, 0, 0, 0.08);
+  --apple-border-focus: rgba(0, 102, 204, 0.5);
+  
+  /* iOS Radii */
+  --ios-radius-lg: 22px;
+  --ios-radius-md: 14px;
+  --ios-radius-sm: 8px;
+  --ios-radius-capsule: 999px;
+
+  /* iOS Shadows */
+  --ios-shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
+  --ios-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.06);
+  --ios-shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.08);
+  --ios-shadow-hover: 0 20px 48px rgba(0, 0, 0, 0.12);
+
+  /* Transitions */
+  --ios-transition-fast: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
+  --ios-transition-spring: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.1);
+  
+  font-family: var(--apple-font-body);
+  line-height: 1.47059;
   font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  letter-spacing: -0.022em;
+  background-color: var(--apple-bg-secondary);
+  color: var(--apple-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background-color: var(--apple-bg-secondary);
+  color: var(--apple-text-primary);
+  font-family: var(--apple-font-body);
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: var(--ios-radius-capsule);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--apple-font-heading);
+  font-weight: 700;
+  letter-spacing: -0.003em;
+  color: var(--apple-text-dark);
 }
 
 h1 {
-  font-size: 3.2em;
+  font-size: 40px;
   line-height: 1.1;
+  font-weight: 800;
+  letter-spacing: -0.015em;
 }
 
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
+h2 {
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+}
+
+h3 {
+  font-size: 20px;
+  line-height: 1.25;
+  font-weight: 600;
+}
+
+p {
+  font-size: 17px;
+  line-height: 1.47059;
+  font-weight: 400;
+  color: var(--apple-text-secondary);
+}
+
+a {
+  color: var(--apple-link);
+  text-decoration: none;
   font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
+  transition: var(--ios-transition-fast);
+}
+
+a:hover {
+  color: var(--apple-blue);
+  text-decoration: underline;
+}
+
+/* iOS Glassmorphism & Cards */
+.ios-glass {
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(20px) saturate(190%);
+  -webkit-backdrop-filter: blur(20px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+.ios-card {
+  background: var(--apple-bg);
+  border-radius: var(--ios-radius-lg);
+  padding: 24px;
+  border: 1px solid var(--apple-border);
+  box-shadow: var(--ios-shadow-md);
+  transition: var(--ios-transition-spring);
+}
+
+.ios-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--ios-shadow-hover);
+}
+
+/* iOS Button - Brand and Default */
+button, .ios-btn {
+  font-family: var(--apple-font-body);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.33337;
+  letter-spacing: -0.01em;
+  padding: 10px 18px;
+  border-radius: var(--ios-radius-md);
+  border: none;
   cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
-}
-/*
-!* Hide number input spinners (Chrome, Edge, Safari) *!
-input[type="number"]::-webkit-outer-spin-button,
-input[type="number"]::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: var(--ios-transition-fast);
+  background-color: var(--apple-bg-secondary);
+  color: var(--apple-text-primary);
+  user-select: none;
 }
 
-!* Hide number input spinners (Firefox) *!
-input[type="number"] {
-  -moz-appearance: textfield;
-}*/
+button:hover, .ios-btn:hover {
+  background-color: var(--apple-bg-tertiary);
+  transform: scale(1.01);
+}
 
+button:active, .ios-btn:active {
+  transform: scale(0.98);
+}
+
+button:disabled, .ios-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+/* Primary iOS Blue Button */
+button.primary, .ios-btn-primary {
+  background-color: var(--apple-blue);
+  color: #ffffff;
+}
+
+button.primary:hover, .ios-btn-primary:hover {
+  background-color: #0055b3;
+}
+
+/* Apple Light Grey Secondary Button (from JSON: buttonPrimary) */
+button.secondary, .ios-btn-secondary {
+  background-color: var(--apple-bg-secondary);
+  color: var(--apple-text-primary);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+button.secondary:hover, .ios-btn-secondary:hover {
+  background-color: var(--apple-bg-tertiary);
+}
+
+/* iOS Inputs */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="date"],
+select,
+textarea {
+  font-family: var(--apple-font-body);
+  font-size: 16px;
+  padding: 12px 16px;
+  border-radius: var(--ios-radius-md);
+  border: 1px solid var(--apple-border);
+  background-color: rgba(0, 0, 0, 0.02);
+  color: var(--apple-text-primary);
+  transition: var(--ios-transition-fast);
+  outline: none;
+}
+
+input:focus, select:focus, textarea:focus {
+  background-color: var(--apple-bg);
+  border-color: var(--apple-blue);
+  box-shadow: 0 0 0 3px var(--apple-border-focus);
+}
+
+/* Animations */
+@keyframes scanning {
+  0% {
+    top: 0%;
+  }
+  50% {
+    top: 100%;
+  }
+  100% {
+    top: 0%;
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.animate-scan {
+  position: relative;
+  overflow: hidden;
+}
+
+.animate-scan::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, var(--apple-accent), transparent);
+  box-shadow: 0 0 10px var(--apple-accent);
+  animation: scanning 3s ease-in-out infinite;
+  z-index: 10;
+}
+
+.animate-pulse-slow {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* Refrigerator 3D Scroll Animation */
+.fridge-scroller-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 60px auto;
+  perspective: 1200px;
+  max-width: 600px;
+}
+
+.fridge-box {
+  width: 280px;
+  height: 380px;
+  background: linear-gradient(135deg, #1c1c1e 0%, #2c2c2e 100%);
+  border-radius: var(--ios-radius-lg);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.3), inset 0 2px 5px rgba(255,255,255,0.1);
+  position: relative;
+  transform-style: preserve-3d;
+  overflow: visible;
+  transition: transform 0.1s ease-out;
+  /* Scroll-linked transform: slide to center and scale up on desktop */
+  transform: translateX(calc(44% * var(--scroll-fraction, 0))) scale(calc(1 + 0.15 * var(--scroll-fraction, 0)));
+}
+
+/* Interior */
+.fridge-interior {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  background: radial-gradient(circle at center, #ffffff 40%, #e5e5ea 100%);
+  border-radius: calc(var(--ios-radius-lg) - 8px);
+  box-shadow: inset 0 0 30px rgba(0, 102, 204, 0.12), inset 0 0 10px rgba(0,0,0,0.1);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  padding: 15px 10px;
+  z-index: 1;
+  overflow: visible;
+  transform-style: preserve-3d;
+}
+
+/* Shelves */
+.fridge-shelf {
+  border-bottom: 3px solid rgba(0, 102, 204, 0.12);
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(5px);
+  height: 90px;
+  position: relative;
+  display: flex;
+  justify-content: space-around;
+  align-items: flex-end;
+  padding-bottom: 8px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.02);
+  transform-style: preserve-3d;
+}
+
+.fridge-item {
+  font-size: 28px;
+  filter: drop-shadow(0 4px 6px rgba(0,0,0,0.15));
+  transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  cursor: pointer;
+  user-select: none;
+  /* Pop out of the fridge in 3D as scroll opens it */
+  transform: translate3d(
+    calc(var(--item-x, 0) * 16px * var(--scroll-fraction, 0)),
+    calc(-15px * var(--scroll-fraction, 0)),
+    calc(50px * var(--scroll-fraction, 0))
+  );
+}
+
+.fridge-item:hover {
+  transform: translate3d(
+    calc(var(--item-x, 0) * 16px * var(--scroll-fraction, 0)),
+    calc(-25px * var(--scroll-fraction, 0)),
+    calc(80px * var(--scroll-fraction, 0))
+  ) scale(1.3);
+}
+
+/* Fridge Doors */
+.fridge-door {
+  position: absolute;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(90deg, #d1d1d6 0%, #f5f5f7 50%, #c7c7cc 100%);
+  border: 1px solid rgba(0,0,0,0.12);
+  z-index: 2;
+  backface-visibility: hidden;
+  transition: transform 0.1s ease-out;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+}
+
+.fridge-door-left {
+  left: 0;
+  border-top-left-radius: var(--ios-radius-lg);
+  border-bottom-left-radius: var(--ios-radius-lg);
+  transform-origin: left center;
+  transform: rotateY(calc(-135deg * var(--scroll-fraction, 0)));
+  border-right: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.fridge-door-right {
+  right: 0;
+  border-top-right-radius: var(--ios-radius-lg);
+  border-bottom-right-radius: var(--ios-radius-lg);
+  transform-origin: right center;
+  transform: rotateY(calc(135deg * var(--scroll-fraction, 0)));
+  border-left: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+/* Handles */
+.fridge-handle {
+  position: absolute;
+  top: 30%;
+  width: 8px;
+  height: 140px;
+  background: linear-gradient(90deg, #8e8e93 0%, #ffffff 50%, #8e8e93 100%);
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.25);
+}
+
+.fridge-handle-left {
+  right: 8px;
+}
+
+.fridge-handle-right {
+  left: 8px;
+}
+
+/* Fridge Logo Badge */
+.fridge-badge {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--apple-font-heading);
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(0, 0, 0, 0.2);
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+}
+
+.fridge-interior-light {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: radial-gradient(circle at top, rgba(0, 102, 204, 0.12) 0%, transparent 70%);
+  z-index: 1;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+
+/* Split Hero Grid Layout */
+.ios-hero-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 48px;
+  align-items: center;
+  margin-bottom: 80px;
+  margin-top: 20px;
+}
+
+@media (max-width: 768px) {
+  .ios-hero-grid {
+    grid-template-columns: 1fr;
+    gap: 40px;
+    text-align: center;
+  }
+  .ios-hero-grid > div {
+    text-align: center !important;
+  }
+}
