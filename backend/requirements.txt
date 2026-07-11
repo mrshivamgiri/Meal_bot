@@ -26,4 +26,4 @@ pypdf~=6.10
 #Security
 bcrypt~=5.0
 PyJWT~=2.13
-slowapi~=0.1.9
+slowapi~=0.1.10
