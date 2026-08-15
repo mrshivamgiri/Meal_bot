@@ -1,6 +1,6 @@
 # Stage 1: Build
 # Digest pinned — see backend/Dockerfile for rationale and bump procedure.
-FROM node:24.15.0-slim@sha256:03eae3ef7e88a9de535496fb488d67e02b9d96a063a8967bae657744ecd513f2 AS build-stage
+FROM node:26.7.0-slim@sha256:4ebb5ace66f15a24c14c492e01a8beeed4fddf970a856109f5126e703e5fe503 AS build-stage
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
