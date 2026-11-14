@@ -3,7 +3,7 @@
 # tag mutability (even rare on official images) can't invalidate a
 # reproducible build. To bump, `docker pull python:<new-tag>` and copy
 # the digest from `docker image inspect --format '{{index .RepoDigests 0}}'`.
-FROM python:3.15.1-slim@sha256:533b0b2f9b5d46fd097091cf826f27902f1d6c3bca714b6dc74551356aa97a51
+FROM python:3.16.0a1-slim@sha256:df293ba3b89f458e1aad6051b62ff1c4fad7b3b52b8147ae9cc4b667f9cf2741
 
 WORKDIR /app
 
